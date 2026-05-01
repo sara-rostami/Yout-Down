@@ -1,0 +1,18 @@
+# Ignore large files (we'll track small ones only)
+*.mp4
+*.mkv
+*.avi
+*.mov
+
+# Keep only small audio files
+*.mp3
+ !downloads/*.mp3
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
