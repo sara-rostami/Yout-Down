@@ -1,18 +1,27 @@
-# .github/workflows/invidious-direct.yml
-name: YouTube Downloader (Direct Invidious)
+# .github/workflows/download.yml
+name: YouTube Downloader
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'YouTube URL'
+        description: 'YouTube URL یا Video ID'
         required: true
         type: string
+      format:
+        description: 'فرمت'
+        required: false
+        default: 'mp3'
+        type: choice
+        options:
+          - mp3
+          - mp4
+          - best
 
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     
     steps:
       - uses: actions/checkout@v4
@@ -24,114 +33,211 @@ jobs:
       
       - name: Install dependencies
         run: |
-          pip install yt-dlp requests
+          pip install requests yt-dlp tqdm
       
-      - name: Download via Invidious
+      - name: Install ffmpeg
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq ffmpeg > /dev/null 2>&1
+      
+      - name: Download YouTube Video
+        id: download
         env:
           VIDEO_URL: ${{ github.event.inputs.url }}
+          FORMAT: ${{ github.event.inputs.format }}
         run: |
           python3 << 'PYTHON_SCRIPT'
-          import subprocess
-          import re
           import os
+          import re
+          import subprocess
+          import requests
+          from urllib.parse import urlparse, parse_qs
           
-          url = os.environ.get('VIDEO_URL', '')
+          VIDEO_URL = os.environ.get('VIDEO_URL', '')
+          FORMAT = os.environ.get('FORMAT', 'mp3')
           
-          # استخراج video ID
-          video_id = re.search(r'(?:v=|/v/)([a-zA-Z0-9_-]{11})', url)
+          # استخراج Video ID
+          def extract_video_id(url):
+              patterns = [
+                  r'(?:v=|/v/)([a-zA-Z0-9_-]{11})',
+                  r'youtu\.be/([a-zA-Z0-9_-]{11})',
+                  r'embed/([a-zA-Z0-9_-]{11})',
+              ]
+              for pattern in patterns:
+                  match = re.search(pattern, url)
+                  if match:
+                      return match.group(1)
+              return url if len(url) == 11 else None
+          
+          video_id = extract_video_id(VIDEO_URL)
           if not video_id:
-              print("❌ Invalid URL")
+              print("❌ Invalid URL or Video ID")
               exit(1)
           
-          video_id = video_id.group(1)
-          print(f"Video ID: {video_id}")
+          print(f"📌 Video ID: {video_id}")
           
-          # سرورهای Invidious
-          instances = [
+          # سرورهای Invidious که الان کار می‌کنند
+          INVIDIOUS_INSTANCES = [
               "yewtu.be",
+              "vid.puffyan.us", 
               "invidious.privacyredirect.com",
-              "invidious.fdn.fr",
-              "vid.puffyan.us",
-              "invidious.kavin.rocks",
+              "invidious.projectsegfau.lt",
+              "inv.nboeck.de",
+              "invidious.protokolla.fi",
+              "invidious.lunar.icu",
+              "yewtu.be",
           ]
           
-          success = False
+          # تست سرور با API
+          def test_instance(instance):
+              try:
+                  resp = requests.get(
+                      f"https://{instance}/api/v1/videos/{video_id}",
+                      timeout=10,
+                      headers={'User-Agent': 'Mozilla/5.0'}
+                  )
+                  return resp.status_code == 200
+              except:
+                  return False
           
-          for instance in instances:
-              print(f"\n🔄 Trying {instance}...")
+          # پیدا کردن سرور فعال
+          working_instance = None
+          print("🔍 Testing Invidious instances...")
+          for instance in INVIDIOUS_INSTANCES:
+              print(f"  Testing {instance}...", end=" ")
+              if test_instance(instance):
+                  working_instance = instance
+                  print("✅ OK")
+                  break
+              else:
+                  print("❌ Failed")
+          
+          if not working_instance:
+              print("❌ No working Invidious instance found")
+              print("🔄 Trying alternative method...")
               
-              # روش 1: yt-dlp با invidious extractor
+              # روش جایگزین: yt-dlp با تنظیمات مختلف
               cmd = [
                   "yt-dlp",
-                  "--extractor-args", f"invidious:{instance}",
+                  "--no-warnings",
+                  "-f", "bestaudio/best",
                   "--extract-audio",
                   "--audio-format", "mp3",
                   "--audio-quality", "0",
                   "--max-filesize", "100M",
+                  "--geo-bypass",
                   "--no-playlist",
-                  "--output", f"downloads/%(title)s.%(ext)s",
+                  "--add-header", "User-Agent:Mozilla/5.0 (compatible; Googlebot/2.1)",
+                  "--add-header", "Accept:text/html,application/xhtml+xml",
+                  "-o", "downloads/%(title)s.%(ext)s",
                   f"https://www.youtube.com/watch?v={video_id}"
               ]
               
               result = subprocess.run(cmd, capture_output=True, text=True)
-              
               if result.returncode == 0:
-                  print(f"✅ Success with {instance}!")
-                  success = True
-                  break
+                  print("✅ Downloaded with yt-dlp fallback!")
               else:
-                  print(f"❌ Failed: {result.stderr[:200]}")
+                  print(f"yt-dlp error: {result.stderr[:300]}")
+                  exit(1)
+          else:
+              print(f"\n📥 Using instance: {working_instance}")
+              
+              # دریافت اطلاعات ویدیو
+              api_url = f"https://{working_instance}/api/v1/videos/{video_id}"
+              resp = requests.get(api_url, timeout=20, headers={'User-Agent': 'Mozilla/5.0'})
+              
+              if resp.status_code != 200:
+                  print(f"❌ API error: {resp.status_code}")
+                  exit(1)
+              
+              data = resp.json()
+              title = data.get('title', 'unknown').replace('/', '-').replace('\\', '-')
+              print(f"📌 Title: {title}")
+              print(f"⏱️ Duration: {int(data.get('lengthSeconds', 0)) // 60} min")
+              
+              # پیدا کردن بهترین فرمت audio
+              audio_formats = []
+              for fmt in data.get('adaptiveFormats', []):
+                  fmt_type = fmt.get('type', '')
+                  if 'audio' in fmt_type:
+                      audio_formats.append({
+                          'bitrate': int(fmt.get('bitrate', 0)),
+                          'url': fmt.get('url'),
+                          'type': fmt_type
+                      })
+              
+              if not audio_formats:
+                  print("❌ No audio format found")
+                  exit(1)
+              
+              # مرتب‌سازی بر اساس bitrate
+              audio_formats.sort(key=lambda x: x['bitrate'], reverse=True)
+              best_audio = audio_formats[0]
+              
+              print(f"🎵 Best audio: {best_audio['bitrate']}kbps")
+              
+              # دانلود
+              print("📥 Downloading...")
+              audio_url = best_audio['url']
+              
+              response = requests.get(audio_url, stream=True, timeout=60, 
+                                     headers={'User-Agent': 'Mozilla/5.0'})
+              
+              if response.status_code == 200:
+                  ext = 'webm' if 'webm' in best_audio['type'] else 'mp4'
+                  filename = f"downloads/{title}.{ext}"
+                  
+                  with open(filename, 'wb') as f:
+                      for chunk in response.iter_content(chunk_size=8192):
+                          f.write(chunk)
+                  
+                  print(f"✅ Downloaded: {filename}")
+                  
+                  # تبدیل به mp3
+                  if FORMAT == 'mp3':
+                      print("🔄 Converting to MP3...")
+                      mp3_filename = f"downloads/{title}.mp3"
+                      convert_cmd = [
+                          'ffmpeg', '-y', '-i', filename,
+                          '-vn', '-acodec', 'libmp3lame', '-q:a', '2',
+                          mp3_filename
+                      ]
+                      subprocess.run(convert_cmd, capture_output=True)
+                      os.remove(filename)
+                      print(f"✅ Converted: {mp3_filename}")
+              else:
+                  print(f"❌ Download failed: {response.status_code}")
+                  exit(1)
           
-          if not success:
-              # روش 2: دانلود مستقیم با curl
-              print("\n🔄 Trying direct download...")
-              for instance in instances:
-                  try:
-                      import requests
-                      
-                      # دریافت اطلاعات ویدیو
-                      api_url = f"https://{instance}/api/v1/videos/{video_id}"
-                      resp = requests.get(api_url, timeout=15)
-                      
-                      if resp.status_code == 200:
-                          data = resp.json()
-                          title = data.get('title', 'video').replace('/', '-')
-                          
-                          # پیدا کردن لینک audio
-                          for fmt in data.get('adaptiveFormats', []):
-                              if 'audio' in fmt.get('type', ''):
-                                  audio_url = fmt.get('url')
-                                  if audio_url:
-                                      print(f"📥 Downloading from {instance}...")
-                                      
-                                      audio_resp = requests.get(audio_url, stream=True, timeout=60)
-                                      if audio_resp.status_code == 200:
-                                          filename = f"downloads/{title}.mp3"
-                                          with open(filename, 'wb') as f:
-                                              for chunk in audio_resp.iter_content(8192):
-                                                  f.write(chunk)
-                                          print(f"✅ Downloaded: {filename}")
-                                          success = True
-                                          break
-                          if success:
-                              break
-                  except Exception as e:
-                      print(f"Error: {e}")
-          
-          if not success:
-              print("❌ All methods failed")
-              exit(1)
+          # لیست فایل‌های دانلود شده
+          print("\n📁 Downloaded files:")
+          for f in os.listdir('downloads'):
+              path = os.path.join('downloads', f)
+              if os.path.isfile(path):
+                  size = os.path.getsize(path) / (1024*1024)
+                  print(f"  - {f} ({size:.2f} MB)")
           
           PYTHON_SCRIPT
+      
+      - name: Cleanup old files
+        run: |
+          cd downloads
+          ls -t | tail -n +11 | xargs rm -f 2>/dev/null || true
+          cd ..
+          echo "📁 Remaining files:"
+          ls -lh downloads/ 2>/dev/null || echo "Empty"
       
       - name: Commit and push
         if: success()
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action Bot"
+          
           git add downloads/
           if ! git diff --staged --quiet; then
             git commit -m "📥 Download $(date +'%Y-%m-%d %H:%M')"
             git push
-            echo "✅ Success!"
+            echo "✅ Pushed to GitHub!"
+          else
+            echo "No changes to commit"
           fi
