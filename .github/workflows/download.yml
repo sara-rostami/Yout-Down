@@ -8,10 +8,19 @@ on:
         description: 'YouTube URL'
         required: true
         type: string
+      format:
+        description: 'Format (audio/video)'
+        required: false
+        default: 'audio'
+        type: choice
+        options:
+          - audio
+          - video
 
 jobs:
   download:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     
     steps:
       - uses: actions/checkout@v4
@@ -23,47 +32,70 @@ jobs:
       
       - name: Install dependencies
         run: |
-          pip install pytubefix pillow
-          # pytubefix نسخه بهتری از pytube است
+          python -m pip install --upgrade pip
+          pip install yt-dlp
       
-      - name: Download Audio
+      - name: Download using Invidious
+        id: download
         env:
           VIDEO_URL: ${{ github.event.inputs.url }}
+          FORMAT: ${{ github.event.inputs.format }}
         run: |
-          python3 << 'EOF'
-          from pytubefix import YouTube
-          from pytubefix.contrib.library import Playlist
-          import os
+          # انتخاب سرور Invidious (اینها رایگان و نیاز به لاگین ندارند)
+          INVIDIOUS_INSTANCES=(
+            "invidious.privacyredirect.com"
+            "invidious.fdn.fr"
+            "invidious.projectsegfau.lt"
+            "iv.nboeck.de"
+            "invidious.moomoo.me"
+          )
           
-          url = os.environ['VIDEO_URL']
-          print(f"Downloading: {url}")
+          # انتخاب تصادفی یک سرور
+          RANDOM_INDEX=$((RANDOM % ${#INVIDIOUS_INSTANCES[@]}))
+          SELECTED_INSTANCE="${INVIDIOUS_INSTANCES[$RANDOM_INDEX]}"
+          echo "Using Invidious instance: $SELECTED_INSTANCE"
           
-          ys = YouTube(url)
-          print(f"Title: {ys.title}")
-          
-          # دانلود audio
-          audio = ys.streams.filter(only_audio=True).order_by('abr').desc().first()
-          out_file = audio.download(output_path="downloads/")
-          
-          # تبدیل به mp3
-          base, ext = os.path.splitext(out_file)
-          new_file = base + '.mp3'
-          os.rename(out_file, new_file)
-          
-          print(f"Downloaded: {new_file}")
-          EOF
+          if [ "$FORMAT" = "audio" ]; then
+            yt-dlp \
+              --extractor-args "youtube:player_client=web" \
+              --extractor-args "invidious:$SELECTED_INSTANCE" \
+              --extract-audio \
+              --audio-format mp3 \
+              --audio-quality 0 \
+              --max-filesize 100M \
+              --no-playlist \
+              --output "downloads/%(title)s.%(ext)s" \
+              "$VIDEO_URL"
+          else
+            yt-dlp \
+              --extractor-args "youtube:player_client=web" \
+              --extractor-args "invidious:$SELECTED_INSTANCE" \
+              --format "best[height<=720]" \
+              --max-filesize 500M \
+              --no-playlist \
+              --output "downloads/%(title)s.%(ext)s" \
+              "$VIDEO_URL"
+          fi
+      
+      - name: List downloaded files
+        run: ls -la downloads/
       
       - name: Commit and push
+        if: success()
         run: |
           git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
+          git config --local user.name "GitHub Action Bot"
           
-          git add downloads/ 2>/dev/null
+          # پاک کردن فایل‌های قدیمی (حداکثر ۱۰ فایل)
+          cd downloads
+          ls -t | tail -n +11 | xargs rm -f 2>/dev/null || true
+          cd ..
           
+          git add downloads/
           if ! git diff --staged --quiet; then
-            cd downloads && ls -t | tail -n +11 | xargs rm -f 2>/dev/null || true
-            cd ..
-            git add downloads/
             git commit -m "📥 Download $(date +'%Y-%m-%d %H:%M')"
             git push
+            echo "✅ Download completed and pushed!"
+          else
+            echo "No new files to commit"
           fi
