@@ -1,17 +1,12 @@
-# .github/workflows/download-invidious-api.yml
-name: YouTube Downloader (Invidious API)
+# .github/workflows/youtube-dl.yml
+name: YouTube Downloader (youtube-dl)
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'YouTube Video ID (just the ID)'
+        description: 'YouTube URL'
         required: true
-        type: string
-      quality:
-        description: 'Quality'
-        required: false
-        default: '360'
         type: string
 
 jobs:
@@ -27,138 +22,36 @@ jobs:
         with:
           python-version: '3.12'
       
-      - name: Install dependencies
-        run: pip install requests tqdm
+      - name: Install youtube-dl with ffmpeg
+        run: |
+          pip install youtube-dl
+          apt-get update && apt-get install -y ffmpeg
       
-      - name: Download via Invidious API
+      - name: Download video
         env:
-          VIDEO_ID: ${{ github.event.inputs.url }}
-          QUALITY: ${{ github.event.inputs.quality }}
+          VIDEO_URL: ${{ github.event.inputs.url }}
         run: |
-          python3 << 'PYTHON_SCRIPT'
-          import requests
-          import json
-          import os
-          import sys
-          
-          VIDEO_ID = os.environ.get('VIDEO_ID', '')
-          QUALITY = os.environ.get('QUALITY', '360')
-          
-          # لیست سرورهای Invidious
-          instances = [
-              "yewtu.be",
-              "invidious.privacyredirect.com",
-              "invidious.fdn.fr",
-              "invidious.kavin.rocks",
-              "vid.puffyan.us",
-              "invidious.snopyta.org",
-              "invidious.moomoo.me",
-          ]
-          
-          def get_video_info(instance, video_id):
-              """دریافت اطلاعات ویدیو از Invidious"""
-              try:
-                  url = f"https://{instance}/api/v1/videos/{video_id}"
-                  response = requests.get(url, timeout=15)
-                  if response.status_code == 200:
-                      return response.json()
-              except Exception as e:
-                  print(f"Error with {instance}: {e}")
-              return None
-          
-          def download_video(instance, video_id, quality='360'):
-              """دانلود ویدیو"""
-              try:
-                  # روش 1: استفاده از direct link
-                  url = f"https://{instance}/api/v1/videos/{video_id}/dearrow"
-                  
-                  # دریافت لینک‌های دانلود
-                  info_url = f"https://{instance}/api/v1/videos/{video_id}"
-                  response = requests.get(info_url, timeout=15)
-                  
-                  if response.status_code == 200:
-                      data = response.json()
-                      title = data.get('title', 'unknown').replace('/', '-').replace('\\', '-')
-                      
-                      print(f"Title: {title}")
-                      print(f"Duration: {data.get('lengthSeconds', 0)} seconds")
-                      
-                      # پیدا کردن فرمت مناسب
-                      adaptiveFormats = data.get('adaptiveFormats', [])
-                      streamingUrls = data.get('streamingUrls', [])
-                      
-                      # انتخاب کیفیت
-                      best_format = None
-                      for fmt in adaptiveFormats:
-                          if fmt.get('type', '').startswith('audio/'):
-                              if not best_format or int(fmt.get('bitrate', 0)) > int(best_format.get('bitrate', 0)):
-                                  best_format = fmt
-                      
-                      if best_format and 'url' in best_format:
-                          print(f"Downloading audio from: {instance}")
-                          audio_url = best_format['url']
-                          
-                          # دانلود فایل
-                          audio_response = requests.get(audio_url, stream=True, timeout=60)
-                          if audio_response.status_code == 200:
-                              filename = f"downloads/{title}.mp3"
-                              with open(filename, 'wb') as f:
-                                  for chunk in audio_response.iter_content(chunk_size=8192):
-                                      f.write(chunk)
-                              print(f"✅ Downloaded: {filename}")
-                              return True
-                      else:
-                          print("No direct download URL available")
-                          
-              except Exception as e:
-                  print(f"Download error: {e}")
-              return False
-          
-          # استخراج Video ID از URL اگر کامل داده شده
-          if 'watch?v=' in VIDEO_ID:
-              import re
-              match = re.search(r'v=([a-zA-Z0-9_-]+)', VIDEO_ID)
-              if match:
-                  VIDEO_ID = match.group(1)
-          
-          print(f"Video ID: {VIDEO_ID}")
-          
-          # تلاش با هر سرور
-          for instance in instances:
-              print(f"\nTrying: {instance}")
-              if download_video(instance, VIDEO_ID, QUALITY):
-                  print(f"✅ Success with {instance}!")
-                  break
-          else:
-              print("❌ All instances failed")
-              sys.exit(1)
-          
-          PYTHON_SCRIPT
-      
-      - name: Convert to MP3 if needed
-        run: |
-          if command -v ffmpeg &> /dev/null; then
-            for file in downloads/*.webm; do
-              if [ -f "$file" ]; then
-                ffmpeg -i "$file" -vn -acodec libmp3lame -q:a 2 "${file%.webm}.mp3" 2>/dev/null
-                rm "$file"
-              fi
-            done
-          fi
+          # استفاده از گزینه‌های مختلف برای دور زدن محدودیت
+          youtube-dl \
+            --no-check-certificate \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            --extractor-args "youtube:player_client=web" \
+            --geo-bypass \
+            --no-playlist \
+            --extract-audio \
+            --audio-format mp3 \
+            --audio-quality 0 \
+            --max-filesize 100M \
+            --output "downloads/%(title)s.%(ext)s" \
+            "$VIDEO_URL"
       
       - name: Commit and push
         if: success()
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action Bot"
-          
-          cd downloads
-          ls -t | tail -n +11 | xargs rm -f 2>/dev/null || true
-          cd ..
-          
           git add downloads/
           if ! git diff --staged --quiet; then
             git commit -m "📥 Download $(date +'%Y-%m-%d %H:%M')"
             git push
-            echo "✅ Success!"
           fi
