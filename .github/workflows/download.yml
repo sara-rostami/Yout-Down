@@ -1,5 +1,5 @@
 # .github/workflows/download.yml
-name: Smart YouTube Downloader
+name: YouTube Downloader
 
 on:
   workflow_dispatch:
@@ -8,20 +8,10 @@ on:
         description: 'YouTube URL'
         required: true
         type: string
-      quality:
-        description: 'Audio Quality'
-        required: false
-        default: 'medium'
-        type: choice
-        options:
-          - low
-          - medium
-          - high
 
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # حداکثر 30 دقیقه
     
     steps:
       - uses: actions/checkout@v4
@@ -29,50 +19,40 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
       
-      - name: Install dependencies
-        run: pip install yt-dlp
-      
-      - name: Download Audio
-        id: download
+      - name: Install yt-dlp with dependencies
         run: |
-          QUALITY="${{ github.event.inputs.quality }}"
-          case $QUALITY in
-            low) BITRATE="128k" ;;
-            medium) BITRATE="192k" ;;
-            high) BITRATE="320k" ;;
-          esac
-          
+          python -m pip install --upgrade pip
+          pip install yt-dlp yt-dlp[default]
+      
+      - name: Download Audio (via Invidious)
+        env:
+          VIDEO_URL: ${{ github.event.inputs.url }}
+        run: |
+          # استفاده از سرور Invidious (جایگزین یوتیوب)
           yt-dlp \
+            --extractor-args "youtube:player_client=android" \
+            --extractor-args "youtube:player_skip=webpage,configs" \
             --extract-audio \
             --audio-format mp3 \
-            --audio-quality $BITRATE \
-            --max-filesize 45M \
+            --audio-quality 0 \
+            --max-filesize 40M \
             --output "downloads/%(title)s.%(ext)s" \
-            "${{ github.event.inputs.url }}"
-          
-          # نام فایل را ذخیره کن
-          echo "filename=$(ls -t downloads/*.mp3 | head -1)" >> $GITHUB_OUTPUT
+            "$VIDEO_URL"
       
-      - name: Check file size
+      - name: Commit and push
         run: |
-          SIZE=$(stat -f%z "${{ steps.download.outputs.filename }}" 2>/dev/null || stat -c%s "${{ steps.download.outputs.filename }}")
-          echo "File size: $SIZE bytes"
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
           
-          if [ $SIZE -gt 50000000 ]; then
-            echo "File too large, removing..."
-            rm "${{ steps.download.outputs.filename }}"
+          git add downloads/ 2>/dev/null
+          
+          if ! git diff --staged --quiet; then
+            cd downloads && ls -t | tail -n +11 | xargs rm -f 2>/dev/null || true
+            cd ..
+            git add downloads/
+            git commit -m "📥 Download $(date +'%Y-%m-%d %H:%M')"
+            git push
+            echo "✅ Success!"
           fi
-      
-      - name: Cleanup old files
-        run: |
-          # فقط 5 فایل آخر را نگه دار
-          cd downloads && ls -t | tail -n +6 | xargs rm -f 2>/dev/null || true
-          cd ../videos && ls -t | tail -n +4 | xargs rm -f 2>/dev/null || true
-      
-      - name: Commit and Push
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "📥 Download $(date +'%Y-%m-%d %H:%M')"
-          file_pattern: "downloads/* videos/*"
