@@ -1,91 +1,78 @@
-name: YouTube Downloader
+# .github/workflows/download.yml
+name: Smart YouTube Downloader
 
 on:
-  # اجرای دستی با ورودی URL
   workflow_dispatch:
     inputs:
       url:
         description: 'YouTube URL'
         required: true
         type: string
-      format:
-        description: 'Format (video/audio)'
+      quality:
+        description: 'Audio Quality'
         required: false
-        default: 'audio'
+        default: 'medium'
         type: choice
         options:
-          - audio
-          - video
-  # اجرای خودکار با schedule
-  schedule:
-    - cron: '0 2 * * *'  # هر روز ساعت 2 صبح
+          - low
+          - medium
+          - high
 
 jobs:
   download:
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # حداکثر 30 دقیقه
     
     steps:
-      # 1. checkout کد
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
-      # 2. نصب Python و yt-dlp
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       
-      - name: Install yt-dlp
-        run: |
-          python -m pip install --upgrade pip
-          pip install yt-dlp
+      - name: Install dependencies
+        run: pip install yt-dlp
       
-      # 3. دانلود ویدیو/صدا
-      - name: Download from YouTube
-        env:
-          VIDEO_URL: ${{ github.event.inputs.url || 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' }}
-          FORMAT_TYPE: ${{ github.event.inputs.format || 'audio' }}
+      - name: Download Audio
+        id: download
         run: |
-          if [ "$FORMAT_TYPE" = "audio" ]; then
-            yt-dlp \
-              --extract-audio \
-              --audio-format mp3 \
-              --audio-quality 0 \
-              --output "downloads/%(title)s.%(ext)s" \
-              "$VIDEO_URL"
-          else
-            yt-dlp \
-              -f "best[filesize<50M]" \
-              --output "videos/%(title)s.%(ext)s" \
-              "$VIDEO_URL"
+          QUALITY="${{ github.event.inputs.quality }}"
+          case $QUALITY in
+            low) BITRATE="128k" ;;
+            medium) BITRATE="192k" ;;
+            high) BITRATE="320k" ;;
+          esac
+          
+          yt-dlp \
+            --extract-audio \
+            --audio-format mp3 \
+            --audio-quality $BITRATE \
+            --max-filesize 45M \
+            --output "downloads/%(title)s.%(ext)s" \
+            "${{ github.event.inputs.url }}"
+          
+          # نام فایل را ذخیره کن
+          echo "filename=$(ls -t downloads/*.mp3 | head -1)" >> $GITHUB_OUTPUT
+      
+      - name: Check file size
+        run: |
+          SIZE=$(stat -f%z "${{ steps.download.outputs.filename }}" 2>/dev/null || stat -c%s "${{ steps.download.outputs.filename }}")
+          echo "File size: $SIZE bytes"
+          
+          if [ $SIZE -gt 50000000 ]; then
+            echo "File too large, removing..."
+            rm "${{ steps.download.outputs.filename }}"
           fi
       
-      # 4. نمایش فایل‌های دانلود شده
-      - name: List downloaded files
+      - name: Cleanup old files
         run: |
-          echo "=== Audio Files ===" && ls -lh downloads/ 2>/dev/null || echo "No audio files"
-          echo "=== Video Files ===" && ls -lh videos/ 2>/dev/null || echo "No video files"
+          # فقط 5 فایل آخر را نگه دار
+          cd downloads && ls -t | tail -n +6 | xargs rm -f 2>/dev/null || true
+          cd ../videos && ls -t | tail -n +4 | xargs rm -f 2>/dev/null || true
       
-      # 5. کامیت و پush فایل‌ها
-      - name: Commit and push files
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          
-          # اضافه کردن فایل‌های جدید
-          git add downloads/ videos/ 2>/dev/null
-          
-          # بررسی تغییرات
-          if git diff --staged --quiet; then
-            echo "No new files to commit"
-          else
-            # حذف فایل‌های قدیمی (بیش از 10 فایل)
-            cd downloads && ls -t | tail -n +11 | xargs rm -f 2>/dev/null || true
-            cd ../videos && ls -t | tail -n +6 | xargs rm -f 2>/dev/null || true
-            cd ../..
-            
-            # کامیت
-            git add downloads/ videos/
-            git commit -m "📥 Download: $(date +'%Y-%m-%d %H:%M')"
-            git push
-          fi
+      - name: Commit and Push
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "📥 Download $(date +'%Y-%m-%d %H:%M')"
+          file_pattern: "downloads/* videos/*"
