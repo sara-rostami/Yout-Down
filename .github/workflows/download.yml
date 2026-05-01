@@ -21,25 +21,37 @@ jobs:
         with:
           python-version: '3.12'
       
-      - name: Install yt-dlp with dependencies
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install yt-dlp yt-dlp[default]
+          pip install pytubefix pillow
+          # pytubefix نسخه بهتری از pytube است
       
-      - name: Download Audio (via Invidious)
+      - name: Download Audio
         env:
           VIDEO_URL: ${{ github.event.inputs.url }}
         run: |
-          # استفاده از سرور Invidious (جایگزین یوتیوب)
-          yt-dlp \
-            --extractor-args "youtube:player_client=android" \
-            --extractor-args "youtube:player_skip=webpage,configs" \
-            --extract-audio \
-            --audio-format mp3 \
-            --audio-quality 0 \
-            --max-filesize 40M \
-            --output "downloads/%(title)s.%(ext)s" \
-            "$VIDEO_URL"
+          python3 << 'EOF'
+          from pytubefix import YouTube
+          from pytubefix.contrib.library import Playlist
+          import os
+          
+          url = os.environ['VIDEO_URL']
+          print(f"Downloading: {url}")
+          
+          ys = YouTube(url)
+          print(f"Title: {ys.title}")
+          
+          # دانلود audio
+          audio = ys.streams.filter(only_audio=True).order_by('abr').desc().first()
+          out_file = audio.download(output_path="downloads/")
+          
+          # تبدیل به mp3
+          base, ext = os.path.splitext(out_file)
+          new_file = base + '.mp3'
+          os.rename(out_file, new_file)
+          
+          print(f"Downloaded: {new_file}")
+          EOF
       
       - name: Commit and push
         run: |
@@ -54,5 +66,4 @@ jobs:
             git add downloads/
             git commit -m "📥 Download $(date +'%Y-%m-%d %H:%M')"
             git push
-            echo "✅ Success!"
           fi
