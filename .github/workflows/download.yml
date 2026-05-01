@@ -1,12 +1,17 @@
-# .github/workflows/download.yml
-name: YouTube Downloader
+# .github/workflows/download-invidious-api.yml
+name: YouTube Downloader (Invidious API)
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'YouTube URL'
+        description: 'YouTube Video ID (just the ID)'
         required: true
+        type: string
+      quality:
+        description: 'Quality'
+        required: false
+        default: '360'
         type: string
 
 jobs:
@@ -22,36 +27,124 @@ jobs:
         with:
           python-version: '3.12'
       
-      - name: Install gallery-dl
-        run: pip install gallery-dl
+      - name: Install dependencies
+        run: pip install requests tqdm
       
-      - name: Download video/audio
+      - name: Download via Invidious API
         env:
-          VIDEO_URL: ${{ github.event.inputs.url }}
+          VIDEO_ID: ${{ github.event.inputs.url }}
+          QUALITY: ${{ github.event.inputs.quality }}
         run: |
-          # استفاده از Invidious instance
-          gallery-dl \
-            --no-check-certificate \
-            --extractor-retries 3 \
-            --extractor-timeout 30 \
-            --write-info-json \
-            --write-description \
-            --write-thumbnail \
-            --write-annotations \
-            --write-subtitles \
-            --subtitles-format srt \
-            --subtitles-lang en,fa \
-            -o "directory=downloads" \
-            -o "filename={title}.{extension}" \
-            --download-threads 1 \
-            "https://yewtu.be/watch?v=$(echo '$VIDEO_URL' | grep -o 'v=[^&]*' | cut -d'=' -f2)"
+          python3 << 'PYTHON_SCRIPT'
+          import requests
+          import json
+          import os
+          import sys
+          
+          VIDEO_ID = os.environ.get('VIDEO_ID', '')
+          QUALITY = os.environ.get('QUALITY', '360')
+          
+          # لیست سرورهای Invidious
+          instances = [
+              "yewtu.be",
+              "invidious.privacyredirect.com",
+              "invidious.fdn.fr",
+              "invidious.kavin.rocks",
+              "vid.puffyan.us",
+              "invidious.snopyta.org",
+              "invidious.moomoo.me",
+          ]
+          
+          def get_video_info(instance, video_id):
+              """دریافت اطلاعات ویدیو از Invidious"""
+              try:
+                  url = f"https://{instance}/api/v1/videos/{video_id}"
+                  response = requests.get(url, timeout=15)
+                  if response.status_code == 200:
+                      return response.json()
+              except Exception as e:
+                  print(f"Error with {instance}: {e}")
+              return None
+          
+          def download_video(instance, video_id, quality='360'):
+              """دانلود ویدیو"""
+              try:
+                  # روش 1: استفاده از direct link
+                  url = f"https://{instance}/api/v1/videos/{video_id}/dearrow"
+                  
+                  # دریافت لینک‌های دانلود
+                  info_url = f"https://{instance}/api/v1/videos/{video_id}"
+                  response = requests.get(info_url, timeout=15)
+                  
+                  if response.status_code == 200:
+                      data = response.json()
+                      title = data.get('title', 'unknown').replace('/', '-').replace('\\', '-')
+                      
+                      print(f"Title: {title}")
+                      print(f"Duration: {data.get('lengthSeconds', 0)} seconds")
+                      
+                      # پیدا کردن فرمت مناسب
+                      adaptiveFormats = data.get('adaptiveFormats', [])
+                      streamingUrls = data.get('streamingUrls', [])
+                      
+                      # انتخاب کیفیت
+                      best_format = None
+                      for fmt in adaptiveFormats:
+                          if fmt.get('type', '').startswith('audio/'):
+                              if not best_format or int(fmt.get('bitrate', 0)) > int(best_format.get('bitrate', 0)):
+                                  best_format = fmt
+                      
+                      if best_format and 'url' in best_format:
+                          print(f"Downloading audio from: {instance}")
+                          audio_url = best_format['url']
+                          
+                          # دانلود فایل
+                          audio_response = requests.get(audio_url, stream=True, timeout=60)
+                          if audio_response.status_code == 200:
+                              filename = f"downloads/{title}.mp3"
+                              with open(filename, 'wb') as f:
+                                  for chunk in audio_response.iter_content(chunk_size=8192):
+                                      f.write(chunk)
+                              print(f"✅ Downloaded: {filename}")
+                              return True
+                      else:
+                          print("No direct download URL available")
+                          
+              except Exception as e:
+                  print(f"Download error: {e}")
+              return False
+          
+          # استخراج Video ID از URL اگر کامل داده شده
+          if 'watch?v=' in VIDEO_ID:
+              import re
+              match = re.search(r'v=([a-zA-Z0-9_-]+)', VIDEO_ID)
+              if match:
+                  VIDEO_ID = match.group(1)
+          
+          print(f"Video ID: {VIDEO_ID}")
+          
+          # تلاش با هر سرور
+          for instance in instances:
+              print(f"\nTrying: {instance}")
+              if download_video(instance, VIDEO_ID, QUALITY):
+                  print(f"✅ Success with {instance}!")
+                  break
+          else:
+              print("❌ All instances failed")
+              sys.exit(1)
+          
+          PYTHON_SCRIPT
       
-      - name: List files
+      - name: Convert to MP3 if needed
         run: |
-          echo "=== Downloaded files ==="
-          find downloads -type f -name "*.mp3" -o -name "*.mp4" -o -name "*.webm" -o -name "*.mkv" 2>/dev/null | head -20
-          echo "=== File sizes ==="
-          du -sh downloads/ 2>/dev/null || echo "Empty"
+          if command -v ffmpeg &> /dev/null; then
+            for file in downloads/*.webm; do
+              if [ -f "$file" ]; then
+                ffmpeg -i "$file" -vn -acodec libmp3lame -q:a 2 "${file%.webm}.mp3" 2>/dev/null
+                rm "$file"
+              fi
+            done
+          fi
       
       - name: Commit and push
         if: success()
